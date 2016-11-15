@@ -1,0 +1,84 @@
+---
+title: "Prediction of proper dumbbell exercise motion"
+author: "Joshua Solomon"
+date: "11/14/2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Summary
+Wearable personal fitness devices can be used to measure variables like calories burned, steps taken, distance walked, and speed run. The accelerometer and gyroscope in the device can be used to not just measure these, but perhaps also how well someone performs a task. Sensors applied to the forearm, arm, belt, and a 1.25-kg dumbbell transmitted information to a Microsoft Kinect device upon performance of a Biceps Curl. Healthy volunteers with little weightlifting experience were asked to either perform it correctly (A) or incorrectly in one of four ways: (B) by throwing the elbows in front, (C) by lifting the dumbbell only halfway, (D) by lowering the dumbbell only halfway, or (E) by throwing the hips to the front. 154 variables were collected from each measurement. To best predict activity, the results were divided into a training set on which to train a model and a probing set to test that model. Features were deselected by presence of null values, near-zero variance, and high correlation among variables. A random forest model was trained on the data set with the remaining variables. The model has an in-sample error rate of 0.24% and an out-of-sample error rate of 0.17%. Thus, the random forest model was able to select the most important features without overfitting.
+
+Data obtained from [http://groupware.les.inf.puc-rio.br/har](http://groupware.les.inf.puc-rio.br/har).
+
+## Cleaning the data set
+The training and test data sets were loaded from their respective files. Variable features prior to training were selected according to three factors:
+
+* Presence of NA's in each column
+* Near-zero variance within a column
+* Correlation of variables with each other (with cutoff = 0.8)
+``` {R feature_select, message=FALSE}
+library(caret)
+pmlTrain <- read.csv("pml-training.csv", na.strings = c("", "NA"))
+pmlTest <- read.csv("pml-testing.csv", na.strings = c("", "NA"))
+pmlTrain <- pmlTrain[-c(1:5)]
+pmlNoNA <- pmlTrain[, colSums(is.na(pmlTrain)) == 0]
+nzv <- nearZeroVar(pmlNoNA)
+pmlNoNA <- pmlNoNA[,-nzv]
+correlationMatrix <- cor(pmlNoNA[,-54])
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff = 0.8)
+pmlNoCor <- pmlNoNA[,-highlyCorrelated]
+```
+
+Subtraction of these features leaves `r length(names(pmlNoCor)) - 1` predictor variables. Further selection of features was done by training the model with the random forest method. The training set provided was sliced into two sets for training and probing.
+
+```{r data_slice, message=FALSE}
+set.seed(20161114)
+inTrain <- createDataPartition(pmlNoCor$classe, p = 0.7, list = FALSE)
+pmlTrain2 <- pmlNoCor[inTrain,]
+pmlProbe <- pmlNoCor[-inTrain,]
+```
+
+Due to the computational intensity of the random forest method, a separate CPU core was isolated for data analysis only.
+
+```{r core_process, message=FALSE}
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+```
+
+The model was then trained on the remaining training set. In order to reduce computational intensity, cross-validation in the training function was set to k-fold subsampling with 10 sampling blocks. Parallel processing was also set up.
+```{r train_model, message=FALSE}
+fitControl <- trainControl(method = "cv", number = 10, allowParallel = TRUE)
+x <- system.time(rf <- train(classe~., method = "rf", 
+                             data = pmlTrain2, trControl = fitControl))
+```
+
+The amount of time elapsed was `r x["elapsed"]/60` minutes. The model selected `r rf$finalModel$mtry` features among the training data set, as these gave the best accuracy in the cross-validation. Fitting any additional features resulted in overfitting of the model and thus reduced accuracy. The out-of-bag estimate of the in-sample error rate was Features utilized by the model were according to their rank of variable importance, as measured by the Gini purity index.
+```{r plot_of_vars, message=FALSE}
+plot(rf, main = "Accuracy by number of predictors in random forest model", 
+     xlab = "Randomly Selected Predictors")
+varImpPlot(rf$finalModel, cex = 0.7, 
+           main = "Most important variables \naccording to random forest model")
+```
+
+Internal statistics of the model were measured using a confusion matrix.
+```{r confuse.train, message=FALSE}
+rf$finalModel
+```
+The out-of-bag error rate in the training set was 0.24%. 
+
+The model was then applied to the probing set in order to estimate the out-of-sample error.
+```{r probe_model, message=FALSE}
+predProbe <- predict(rf, pmlProbe)
+confusionMatrix(predProbe, pmlProbe$classe)
+```
+The out-of-sample error rate estimated on the probing set was `r 1 - confusionMatrix(predProbe, pmlProbe$classe)$overall[[1]]`. Thus, the model was fit satisfactorily. The model was thus ready to use to predict the activity of the 20 participants in the test set.
+```{r test_model, message=FALSE}
+predTest <- predict(rf, pmlTest)
+predTest
+```
